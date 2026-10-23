@@ -2,13 +2,17 @@
 .SYNOPSIS
   Installs the latest GitHub release into the WoW AddOns folder using the GitHub CLI.
   Works with a private repo (unlike addon managers, which need a public one). Requires `gh auth login`.
+.PARAMETER Client
+  retail or forever: the client to install into, found by find-wow-addons.ps1. Defaults to retail.
 .PARAMETER AddOnsPath
-  Path to Interface\AddOns. Defaults to the retail install used on this machine.
+  An Interface\AddOns folder to install into instead.
 #>
 param(
   [string]$Repo = "jkloss4/nameplate-quest-markers",
-  [string]$AddOnsPath = "C:\Games\Battle.net\Games\World of Warcraft\_retail_\Interface\AddOns"
+  [ValidateSet("retail", "forever")][string]$Client = "retail",
+  [string]$AddOnsPath
 )
+if (-not $AddOnsPath) { $AddOnsPath = & (Join-Path $PSScriptRoot "find-wow-addons.ps1") -Client $Client }
 $tmp = Join-Path $env:TEMP "forever-quest-mark-custom-update"
 if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
 New-Item -ItemType Directory -Path $tmp | Out-Null
