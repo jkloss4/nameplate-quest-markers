@@ -14,6 +14,7 @@ it alongside the upstream addon.
   is the fallback when the quest log can't tell.
 - **Talk-to NPCs.** Units whose tooltip lists no objective, but that the game reports as part of an active quest,
   get the other icon. A speech bubble (`Crosshair_speak_32`) is available for it in the icon list.
+- **Position**: left, center or right of the nameplate (Left mirrors the second icon and progress text outward).
 - **Two icons** side by side for a unit that counts for objectives of two different kinds, each with its progress.
 - **Progress-bar percentages** ("35%") next to the icon, like "3/8" counts.
 - **Refresh fixes.** Retail nameplates store their unit as `unitToken`; upstream looked up `namePlateUnitToken`, so
@@ -28,7 +29,7 @@ it alongside the upstream addon.
   `/fqm debug` shows every mark; slash commands refresh an open settings page.
 - The CurseForge project id has been removed from the TOC on purpose, so managers won't replace this with upstream.
 
-Slash commands: `/fqm` (settings), `/fqm kill|loot|other <atlas>`, `/fqm x|y|size <n>`, `/fqm reset`, `/fqm debug`.
+Slash commands: `/fqm` (settings), `/fqm kill|loot|other <atlas>`, `/fqm x|y|size <n>`, `/fqm side left|center|right`, `/fqm reset`, `/fqm debug`.
 
 ## Install
 

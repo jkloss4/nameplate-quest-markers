@@ -5,7 +5,7 @@ local icons = {}
 local Relayout -- defined below, referenced by the event handler
 -- Saved variables load after this file runs, so adopt them on ADDON_LOADED (see bottom).
 local DB = setmetatable({}, { __index = { kill = "Crosshair_Attack_32", loot = "Crosshair_pickup_32", other = "Crosshair_Interact_32",
-    x = 4, y = -8, size = 20,
+    side = "right", x = 4, y = -8, size = 20,
     enabled = true, progress = true, hideInInstances = false } })
 
 -- Objective text reduced to its words, so a tooltip line and the matching quest log objective
@@ -194,20 +194,44 @@ local function LogGuess(unit)
     return DB.loot, "" -- mixed or unknown: loot is the likelier kind for a named-but-unmatched mob
 end
 
+-- The second icon and the progress text go on the side away from the nameplate: to the left of the
+-- mark when it's left of the plate, else to its right. Returns point, relativePoint, gap.
+local function Outward()
+    if DB.side == "left" then return "RIGHT", "LEFT", -2 end
+    return "LEFT", "RIGHT", 2
+end
+
+-- Put the mark beside the nameplate (left or right; the horizontal offset is the gap from that edge) or
+-- over its middle (the offset moves it right), then its second icon and progress text after it.
+local function Place(f)
+    local plate = f:GetParent()
+    f:ClearAllPoints()
+    if DB.side == "left" then
+        f:SetPoint("RIGHT", plate, "LEFT", -DB.x, DB.y)
+    elseif DB.side == "center" then
+        f:SetPoint("CENTER", plate, "CENTER", DB.x, DB.y)
+    else
+        f:SetPoint("LEFT", plate, "RIGHT", DB.x, DB.y)
+    end
+    local point, relPoint, gap = Outward()
+    f.tex2:ClearAllPoints()
+    f.tex2:SetPoint(point, f, relPoint, gap, 0)
+    f.text:ClearAllPoints()
+    f.text:SetPoint(point, f.tex2:IsShown() and f.tex2 or f, relPoint, gap, 0)
+end
+
 local function GetIcon(plate)
     if icons[plate] then return icons[plate] end
     local f = CreateFrame("Frame", nil, plate)
     f:SetSize(DB.size, DB.size)
-    f:SetPoint("LEFT", plate, "RIGHT", DB.x, DB.y)
     f.tex = f:CreateTexture(nil, "OVERLAY")
     f.tex:SetAllPoints()
     -- second icon, for a unit that counts for objectives of two different kinds
     f.tex2 = f:CreateTexture(nil, "OVERLAY")
     f.tex2:SetSize(DB.size, DB.size)
-    f.tex2:SetPoint("LEFT", f, "RIGHT", 2, 0)
     f.tex2:Hide()
     f.text = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    f.text:SetPoint("LEFT", f, "RIGHT", 2, 0)
+    Place(f)
     icons[plate] = f
     return f
 end
@@ -225,8 +249,9 @@ local function SetMarks(icon, marks)
         icon.tex2:Hide()
     end
 
+    local point, relPoint, gap = Outward()
     icon.text:ClearAllPoints()
-    icon.text:SetPoint("LEFT", second and icon.tex2 or icon, "RIGHT", 2, 0)
+    icon.text:SetPoint(point, second and icon.tex2 or icon, relPoint, gap, 0)
 
     local parts = {}
     if DB.progress then
@@ -366,8 +391,7 @@ function Relayout()
     for _, f in pairs(icons) do
         f:SetSize(DB.size, DB.size)
         f.tex2:SetSize(DB.size, DB.size)
-        f:ClearAllPoints()
-        f:SetPoint("LEFT", f:GetParent(), "RIGHT", DB.x, DB.y)
+        Place(f)
     end
     UpdateAll()
 end
@@ -406,7 +430,13 @@ page:Checkbox("Hide Inside Instances", Getter("hideInInstances"), Setter("hideIn
     "Turn marks off in dungeons, raids, battlegrounds and arenas. Inside instances the icon kind is guessed from the quest log and may be wrong when kill and loot quests mix.")
 page:Header("Icon")
 page:Slider("Size", 10, 48, 1, Getter("size"), Setter("size"), Pixels, "Size of the quest mark.")
-page:Slider("Horizontal Offset", -60, 60, 1, Getter("x"), Setter("x"), Pixels, "Distance from the right edge of the nameplate.")
+page:Dropdown("Position", {
+    { label = "Left", value = "left", tooltip = "Left of the nameplate." },
+    { label = "Center", value = "center", tooltip = "Over the middle of the nameplate." },
+    { label = "Right", value = "right", tooltip = "Right of the nameplate." },
+}, Getter("side"), Setter("side"), "Which side of the nameplate the quest mark goes on.")
+page:Slider("Horizontal Offset", -60, 60, 1, Getter("x"), Setter("x"), Pixels,
+    "Left or Right: the gap from that edge of the nameplate (higher is further out). Center: how far right of the middle.")
 page:Slider("Vertical Offset", -60, 60, 1, Getter("y"), Setter("y"), Pixels, "Distance up or down from the middle of the nameplate.")
 page:Dropdown("Kill Objective Icon", IconOptions, Getter("kill"), Setter("kill"), "Icon for units you need to kill.")
 page:Dropdown("Loot Objective Icon", IconOptions, Getter("loot"), Setter("loot"), "Icon for units that drop quest items.")
@@ -421,6 +451,8 @@ SlashCmdList.FOREVERQUESTMARK = function(msg)
     local cmd, arg = msg:match("^(%S+)%s*(.-)$")
     if (cmd == "x" or cmd == "y" or cmd == "size") and tonumber(arg) then
         DB[cmd] = tonumber(arg)
+    elseif cmd == "side" and (arg == "left" or arg == "center" or arg == "right") then
+        DB.side = arg
     elseif (cmd == "kill" or cmd == "loot" or cmd == "other") and arg ~= "" then
         if not C_Texture.GetAtlasInfo(arg) then print("Nameplate Quest Markers: no atlas named " .. arg); return end
         DB[cmd] = arg
