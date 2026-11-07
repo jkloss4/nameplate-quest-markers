@@ -5,7 +5,7 @@ local icons = {}
 local Relayout -- defined below, referenced by the event handler
 -- Saved variables load after this file runs, so adopt them on ADDON_LOADED (see bottom).
 local DB = setmetatable({}, { __index = { kill = "Crosshair_Attack_32", loot = "Crosshair_pickup_32", other = "Crosshair_Interact_32",
-    side = "right", x = 4, y = -8, size = 20,
+    side = "right", x = 4, y = -8, size = 20, avoidAuras = true, auraGap = 2,
     enabled = true, progress = true, hideInInstances = false } })
 
 -- Objective text reduced to its words, so a tooltip line and the matching quest log objective
@@ -209,15 +209,85 @@ end
 -- Right: its left edge (the icon's) the horizontal offset right of the nameplate.
 -- Left: its right edge (the progress text's) the offset left of the nameplate.
 -- Center: its middle the offset right of the nameplate's middle.
+local function Number(v)
+    if v == nil or (issecretvalue and issecretvalue(v)) then return nil end
+    return v
+end
+
+-- The shown aura icons on a nameplate (Blizzard's debuff, buff and crowd control lists), each as
+-- { left, right, bottom, top } on the screen. Anything unreadable (secret) is left out.
+local AURA_LISTS = { "DebuffListFrame", "BuffListFrame", "CrowdControlListFrame" }
+
+local function AuraRects(plate)
+    local auras = plate.UnitFrame and plate.UnitFrame.AurasFrame
+    local out = {}
+    if not auras then return out end
+    for _, key in ipairs(AURA_LISTS) do
+        local list = auras[key]
+        if list and list:IsVisible() then
+            for _, item in ipairs({ list:GetChildren() }) do
+                local shown = Number(item:IsVisible())
+                if shown then
+                    local ok, l, b, w, h = pcall(item.GetRect, item)
+                    l, b, w, h = Number(l), Number(b), Number(w), Number(h)
+                    if ok and l and b and w and h and w > 0 then
+                        local s = item:GetEffectiveScale()
+                        out[#out + 1] = { l * s, (l + w) * s, b * s, (b + h) * s }
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- How far (screen units) the mark at { left, right, bottom, top } has to slide to clear the auras by
+-- the spacing: right for Right, left for Left, up for Center. 0 when nothing's in the way.
+local function AuraShift(plate, mark, gap)
+    local shift = 0
+    for _, a in ipairs(AuraRects(plate)) do
+        local l, r, b, t = mark[1] - gap, mark[2] + gap, mark[3] - gap, mark[4] + gap
+        if a[1] < r and a[2] > l and a[3] < t and a[4] > b then -- overlaps (or is closer than the spacing)
+            local need
+            if DB.side == "left" then need = mark[2] - (a[1] - gap)
+            elseif DB.side == "center" then need = a[4] + gap - mark[3]
+            else need = a[2] + gap - mark[1] end
+            if need > shift then shift = need end
+        end
+    end
+    return shift
+end
+
 local function Place(f)
     local plate, width = f:GetParent(), MarkWidth(f)
-    f:ClearAllPoints()
+    local x, y = DB.x, DB.y
+    local point, relPoint
     if DB.side == "left" then
-        f:SetPoint("LEFT", plate, "LEFT", -DB.x - width, DB.y)
+        point, relPoint, x = "LEFT", "LEFT", -DB.x - width
     elseif DB.side == "center" then
-        f:SetPoint("LEFT", plate, "CENTER", DB.x - width / 2, DB.y)
+        point, relPoint, x = "LEFT", "CENTER", DB.x - width / 2
     else
-        f:SetPoint("LEFT", plate, "RIGHT", DB.x, DB.y)
+        point, relPoint = "LEFT", "RIGHT"
+    end
+    f:ClearAllPoints()
+    f:SetPoint(point, plate, relPoint, x, y)
+    -- Avoid Auras: slide the whole mark clear of any aura icon in its way. Auras are kept in place
+    -- (Blizzard's), so this checks where they are now; the lists' layouts call Place again on change.
+    if DB.avoidAuras then
+        local ok, l, b = pcall(f.GetRect, f)
+        l, b = Number(l), Number(b)
+        if ok and l and b then
+            local s = f:GetEffectiveScale()
+            local mark = { l * s, (l + width) * s, b * s, (b + DB.size) * s }
+            local shift = AuraShift(plate, mark, DB.auraGap * s) / s
+            if shift > 0 then
+                if DB.side == "left" then x = x - shift
+                elseif DB.side == "center" then y = y + shift
+                else x = x + shift end
+                f:ClearAllPoints()
+                f:SetPoint(point, plate, relPoint, x, y)
+            end
+        end
     end
     f.tex2:ClearAllPoints()
     f.tex2:SetPoint("LEFT", f, "RIGHT", GAP, 0)
@@ -236,6 +306,17 @@ local function GetIcon(plate)
     f.tex2:SetSize(DB.size, DB.size)
     f.tex2:Hide()
     f.text = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    -- Avoid Auras: place the mark again whenever one of the plate's aura lists lays itself out
+    -- (Blizzard does that each time the unit's auras change). Secure hooks, so Blizzard's code isn't touched.
+    local auras = plate.UnitFrame and plate.UnitFrame.AurasFrame
+    for _, key in ipairs(AURA_LISTS) do
+        local list = auras and auras[key]
+        if list and list.Layout then
+            hooksecurefunc(list, "Layout", function()
+                if DB.avoidAuras and f:IsShown() then Place(f) end
+            end)
+        end
+    end
     Place(f)
     icons[plate] = f
     return f
@@ -440,6 +521,10 @@ page:Dropdown("Position", {
 page:Slider("Horizontal Offset", -60, 60, 1, Getter("x"), Setter("x"), Pixels,
     "Right: the gap from the nameplate to the icon. Left: the gap from the progress text to the nameplate. Center: how far right of the nameplate's middle the middle of the icon and text is. Higher is further out (Center: further right).")
 page:Slider("Vertical Offset", -60, 60, 1, Getter("y"), Setter("y"), Pixels, "Distance up or down from the middle of the nameplate.")
+page:Checkbox("Avoid Auras", Getter("avoidAuras"), Setter("avoidAuras"),
+    "When buff, debuff or crowd control icons on the nameplate are in the way, slide the quest mark clear of them: right when Position is Right, left when Left, up when Center.")
+page:Slider("Aura Spacing", 0, 20, 1, Getter("auraGap"), Setter("auraGap"), Pixels,
+    "The space to leave between the aura icons and the quest mark.", { indent = true, enabled = Getter("avoidAuras") })
 page:Dropdown("Kill Objective Icon", IconOptions, Getter("kill"), Setter("kill"), "Icon for units you need to kill.")
 page:Dropdown("Loot Objective Icon", IconOptions, Getter("loot"), Setter("loot"), "Icon for units that drop quest items.")
 page:Dropdown("Other Objective Icon", IconOptions, Getter("other"), Setter("other"),
