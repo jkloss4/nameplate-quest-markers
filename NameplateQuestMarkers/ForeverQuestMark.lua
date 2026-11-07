@@ -201,84 +201,75 @@ local function MarkWidth(f)
     local width = DB.size
     if f.tex2:IsShown() then width = width + GAP + DB.size end
     local text = f.text:GetText()
-    if text and text ~= "" then width = width + GAP + f.text:GetStringWidth() end
+    if text and text ~= "" then
+        local ok, w = pcall(f.text.GetStringWidth, f.text)
+        if not ok or not w or (issecretvalue and issecretvalue(w)) then w = #text * 6 end -- (a guess, if it can't be read)
+        width = width + GAP + w
+    end
     return width
 end
 
-local function Number(v)
-    if v == nil or (issecretvalue and issecretvalue(v)) then return nil end
-    return v
-end
-
--- The shown aura icons on a nameplate (Blizzard's debuff, buff and crowd control lists), each as
--- { left, right, bottom, top } on the screen. Anything unreadable (secret) is left out.
+-- Avoid Auras. Nameplates are restricted on this client: an addon can't measure them or anything on
+-- them (GetRect fails), so it can't tell whether an aura icon overlaps the mark. It can still anchor
+-- to Blizzard's frames, so while the aura list on the mark's side has icons, the mark is anchored past
+-- that list instead: right of the crowd control icons (Right), left of the buff icons (Left), above the
+-- debuff icons (Center), Aura Spacing away.
 local AURA_LISTS = { "DebuffListFrame", "BuffListFrame", "CrowdControlListFrame" }
+local SIDE_LIST = { right = "CrowdControlListFrame", left = "BuffListFrame", center = "DebuffListFrame" }
+local FAR = 1000 -- (the helper's far edges: well past anything on a nameplate, so it never turns inside out)
 
--- (stats: for /fqm debug, counts of what was found and what couldn't be read)
-local function AuraRects(plate, stats)
+-- how many of a list's aura icons are showing (only whether they're shown is read)
+local function ShownCount(list)
+    if not (list and list:IsShown()) then return 0 end
+    local n = 0
+    for _, item in ipairs({ list:GetChildren() }) do
+        local ok, shown = pcall(item.IsShown, item)
+        if ok and shown and not (issecretvalue and issecretvalue(shown)) then n = n + 1 end
+    end
+    return n
+end
+
+-- the aura list in the way of the mark: the one on its side, while it has icons
+local function ListInTheWay(plate)
     local auras = plate.UnitFrame and plate.UnitFrame.AurasFrame
-    local out = {}
-    if not auras then return out end
-    for _, key in ipairs(AURA_LISTS) do
-        local list = auras[key]
-        if list and list:IsVisible() then
-            for _, item in ipairs({ list:GetChildren() }) do
-                local shown = Number(item:IsVisible())
-                if stats then stats.items = (stats.items or 0) + 1 end
-                if shown then
-                    local ok, l, b, w, h = pcall(item.GetRect, item)
-                    l, b, w, h = Number(l), Number(b), Number(w), Number(h)
-                    if ok and l and b and w and h and w > 0 then
-                        local s = item:GetEffectiveScale()
-                        out[#out + 1] = { l * s, (l + w) * s, b * s, (b + h) * s }
-                    elseif stats then
-                        stats.unreadable = (stats.unreadable or 0) + 1
-                    end
-                end
-            end
-        end
+    local list = auras and auras[SIDE_LIST[DB.side] or SIDE_LIST.right]
+    if list and ShownCount(list) > 0 then return list end
+    if DB.side ~= "left" and DB.side ~= "center" then
+        -- (loss of control shows in the crowd control icons' place)
+        local loc = auras and auras.LossOfControlFrame
+        if loc and loc:IsShown() then return loc end
     end
-    return out
 end
 
--- How far (screen units) the mark at { left, right, bottom, top } has to slide to clear the auras by
--- the spacing: right for Right, left for Left, up for Center. 0 when nothing's in the way.
-local function AuraShift(plate, mark, gap)
-    local shift = 0
-    for _, a in ipairs(AuraRects(plate)) do
-        local l, r, b, t = mark[1] - gap, mark[2] + gap, mark[3] - gap, mark[4] + gap
-        if a[1] < r and a[2] > l and a[3] < t and a[4] > b then -- overlaps (or is closer than the spacing)
-            local need
-            if DB.side == "left" then need = mark[2] - (a[1] - gap)
-            elseif DB.side == "center" then need = a[4] + gap - mark[3]
-            else need = a[2] + gap - mark[1] end
-            if need > shift then shift = need end
-        end
-    end
-    return shift
-end
-
--- Avoid Auras: place a plate's mark again whenever one of its aura lists lays itself out (Blizzard
--- does that each time the unit's auras change). Nameplates swap their unit frame (and so their aura
--- lists) from a pool, so each list is hooked the first time it's seen on any plate, and finds its
--- plate's mark when called. Secure hooks: Blizzard's code isn't touched.
+-- Place a plate's mark again whenever one of its aura lists lays itself out (Blizzard does that each
+-- time the unit's auras change) or loss of control shows or hides. Nameplates swap their unit frame
+-- (and so their aura lists) from a pool, so each is hooked the first time it's seen on any plate and
+-- finds its plate's mark when called. Secure hooks: Blizzard's code isn't touched.
 local Place
-local hookedLists = setmetatable({}, { __mode = "k" })
+local hooked = setmetatable({}, { __mode = "k" })
+
+local function Replace(frame)
+    if not DB.avoidAuras then return end
+    local unitFrame = frame:GetParent() and frame:GetParent():GetParent()
+    local f = unitFrame and icons[unitFrame:GetParent()]
+    if f and f:IsShown() then Place(f) end
+end
 
 local function HookAuraLists(plate)
     local auras = plate.UnitFrame and plate.UnitFrame.AurasFrame
     if not auras then return end
     for _, key in ipairs(AURA_LISTS) do
         local list = auras[key]
-        if list and list.Layout and not hookedLists[list] then
-            hookedLists[list] = true
-            hooksecurefunc(list, "Layout", function(self)
-                if not DB.avoidAuras then return end
-                local unitFrame = self:GetParent() and self:GetParent():GetParent()
-                local f = unitFrame and icons[unitFrame:GetParent()]
-                if f and f:IsShown() then Place(f) end
-            end)
+        if list and list.Layout and not hooked[list] then
+            hooked[list] = true
+            hooksecurefunc(list, "Layout", Replace)
         end
+    end
+    local loc = auras.LossOfControlFrame
+    if loc and not hooked[loc] then
+        hooked[loc] = true
+        loc:HookScript("OnShow", Replace)
+        loc:HookScript("OnHide", Replace)
     end
 end
 
@@ -286,44 +277,49 @@ end
 -- Right: its left edge (the icon's) the horizontal offset right of the nameplate.
 -- Left: its right edge (the progress text's) the offset left of the nameplate.
 -- Center: its middle the offset right of the nameplate's middle.
--- Avoid Auras then slides it clear of any aura icon in its way.
+-- With Avoid Auras and auras in the way, Right and Left measure from the auras' outer edge (the
+-- horizontal offset is replaced by Aura Spacing), and Center sits Aura Spacing above the debuffs.
 function Place(f)
     local plate, width = f:GetParent(), MarkWidth(f)
     HookAuraLists(plate)
-    local x, y = DB.x, DB.y
-    local point, relPoint
-    if DB.side == "left" then
-        point, relPoint, x = "LEFT", "LEFT", -DB.x - width
-    elseif DB.side == "center" then
-        point, relPoint, x = "LEFT", "CENTER", DB.x - width / 2
-    else
-        point, relPoint = "LEFT", "RIGHT"
-    end
+    local list = DB.avoidAuras and ListInTheWay(plate)
+    local helper = f.helper
     f:ClearAllPoints()
-    f:SetPoint(point, plate, relPoint, x, y)
-    -- Avoid Auras: slide the whole mark clear of any aura icon in its way. Auras are kept in place
-    -- (Blizzard's), so this checks where they are now; the lists' layouts call Place again on change.
-    if DB.avoidAuras then
-        local ok, l, b = pcall(f.GetRect, f)
-        l, b = Number(l), Number(b)
-        if ok and l and b then
-            local s = f:GetEffectiveScale()
-            local mark = { l * s, (l + width) * s, b * s, (b + DB.size) * s }
-            local shift = AuraShift(plate, mark, DB.auraGap * s) / s
-            if shift > 0 then
-                if DB.side == "left" then x = x - shift
-                elseif DB.side == "center" then y = y + shift
-                else x = x + shift end
-                f:ClearAllPoints()
-                f:SetPoint(point, plate, relPoint, x, y)
-            end
+    if list then
+        -- The helper is an empty frame whose corner is where two things meet: the auras' edge on one
+        -- axis and the nameplate's middle on the other (anchoring can't take x and y from different
+        -- frames in one point). Its far edges are pushed well out so it always has a positive size.
+        if not helper then
+            helper = CreateFrame("Frame", nil, plate)
+            f.helper = helper
         end
+        helper:ClearAllPoints()
+        if DB.side == "left" then
+            helper:SetPoint("TOPRIGHT", list, "TOPLEFT", 0, FAR)
+            helper:SetPoint("BOTTOMLEFT", plate, "LEFT", -FAR, 0)
+            f:SetPoint("LEFT", helper, "BOTTOMRIGHT", -DB.auraGap - width, DB.y)
+        elseif DB.side == "center" then
+            helper:SetPoint("TOPRIGHT", list, "TOPRIGHT", FAR, 0)
+            helper:SetPoint("BOTTOMLEFT", plate, "CENTER", 0, -FAR)
+            f:SetPoint("BOTTOMLEFT", helper, "TOPLEFT", DB.x - width / 2, DB.auraGap)
+        else
+            helper:SetPoint("TOPLEFT", list, "TOPRIGHT", 0, FAR)
+            helper:SetPoint("BOTTOMRIGHT", plate, "RIGHT", FAR, 0)
+            f:SetPoint("LEFT", helper, "BOTTOMLEFT", DB.auraGap, DB.y)
+        end
+    elseif DB.side == "left" then
+        f:SetPoint("LEFT", plate, "LEFT", -DB.x - width, DB.y)
+    elseif DB.side == "center" then
+        f:SetPoint("LEFT", plate, "CENTER", DB.x - width / 2, DB.y)
+    else
+        f:SetPoint("LEFT", plate, "RIGHT", DB.x, DB.y)
     end
     f.tex2:ClearAllPoints()
     f.tex2:SetPoint("LEFT", f, "RIGHT", GAP, 0)
     f.text:ClearAllPoints()
     f.text:SetPoint("LEFT", f.tex2:IsShown() and f.tex2 or f, "RIGHT", GAP, 0)
 end
+
 
 local function GetIcon(plate)
     if icons[plate] then return icons[plate] end
@@ -541,9 +537,9 @@ page:Slider("Horizontal Offset", -60, 60, 1, Getter("x"), Setter("x"), Pixels,
     "Right: the gap from the nameplate to the icon. Left: the gap from the progress text to the nameplate. Center: how far right of the nameplate's middle the middle of the icon and text is. Higher is further out (Center: further right).")
 page:Slider("Vertical Offset", -60, 60, 1, Getter("y"), Setter("y"), Pixels, "Distance up or down from the middle of the nameplate.")
 page:Checkbox("Avoid Auras", Getter("avoidAuras"), Setter("avoidAuras"),
-    "When buff, debuff or crowd control icons on the nameplate are in the way, slide the quest mark clear of them: right when Position is Right, left when Left, up when Center.")
+    "While the nameplate shows aura icons on the quest mark's side, move the mark past them: right of the crowd control icons when Position is Right, left of the buff icons when Left, above the debuff icons when Center. It moves back when they're gone.")
 page:Slider("Aura Spacing", 0, 20, 1, Getter("auraGap"), Setter("auraGap"), Pixels,
-    "The space to leave between the aura icons and the quest mark.", { indent = true, enabled = Getter("avoidAuras") })
+    "The space between the aura icons and the quest mark while it's moved past them (in place of the horizontal offset for Left and Right, and the vertical offset for Center).", { indent = true, enabled = Getter("avoidAuras") })
 page:Dropdown("Kill Objective Icon", IconOptions, Getter("kill"), Setter("kill"), "Icon for units you need to kill.")
 page:Dropdown("Loot Objective Icon", IconOptions, Getter("loot"), Setter("loot"), "Icon for units that drop quest items.")
 page:Dropdown("Other Objective Icon", IconOptions, Getter("other"), Setter("other"),
@@ -585,30 +581,19 @@ SlashCmdList.FOREVERQUESTMARK = function(msg)
             debugFrame:Hide()
         else p("RelatedToQuest:", tostring(rel)) end
         p("LogGuess:", pcall(LogGuess, "target"))
-        -- Avoid Auras: what the target's nameplate auras look like to the addon
+        -- Avoid Auras: the target's aura icons as the addon sees them, and which list the mark sits past
         local plate = C_NamePlate.GetNamePlateForUnit("target")
-        if plate then
-            local stats = {}
-            local rects = AuraRects(plate, stats)
-            local auras = plate.UnitFrame and plate.UnitFrame.AurasFrame
-            p("auras frame:", tostring(auras ~= nil), "aura items:", stats.items or 0, "readable:", #rects,
-                "unreadable:", stats.unreadable or 0)
-            local f = icons[plate]
-            if f and f:IsShown() then
-                local ok, l, b = pcall(f.GetRect, f)
-                local secret = issecretvalue and ok and (issecretvalue(l) or issecretvalue(b))
-                local s = f:GetEffectiveScale()
-                if ok and l and not secret then
-                    local mark = { l * s, (l + MarkWidth(f)) * s, b * s, (b + DB.size) * s }
-                    p(("mark: %.0f-%.0f x %.0f-%.0f, shift needed: %.1f"):format(mark[1], mark[2], mark[3], mark[4],
-                        AuraShift(plate, mark, DB.auraGap * s) / s))
-                else
-                    p("mark rect:", ok and (secret and "<secret>" or "nil") or tostring(l))
-                end
-                for i, a in ipairs(rects) do p(("aura %d: %.0f-%.0f x %.0f-%.0f"):format(i, a[1], a[2], a[3], a[4])) end
-            else
-                p("no mark shown on the target's nameplate")
-            end
+        local auras = plate and plate.UnitFrame and plate.UnitFrame.AurasFrame
+        if auras then
+            p("aura icons: debuffs", ShownCount(auras.DebuffListFrame), "buffs", ShownCount(auras.BuffListFrame),
+                "crowd control", ShownCount(auras.CrowdControlListFrame), "loss of control",
+                tostring(auras.LossOfControlFrame and auras.LossOfControlFrame:IsShown()))
+            local list = DB.avoidAuras and ListInTheWay(plate)
+            p("position:", DB.side, "avoid auras:", tostring(DB.avoidAuras), "anchored past:",
+                list and (list == auras.LossOfControlFrame and "loss of control" or list == auras.DebuffListFrame
+                    and "debuffs" or list == auras.BuffListFrame and "buffs" or "crowd control") or "nothing")
+        else
+            p("no auras frame on the target's nameplate")
         end
         local qok, marks = pcall(QuestInfo, "target")
         if not qok then

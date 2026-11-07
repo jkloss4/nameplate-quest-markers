@@ -15,7 +15,7 @@ it alongside the upstream addon.
 - **Talk-to NPCs.** Units whose tooltip lists no objective, but that the game reports as part of an active quest,
   get the other icon. A speech bubble (`Crosshair_speak_32`) is available for it in the icon list.
 - **Position**: left, center or right of the nameplate. The horizontal offset is measured from the icon's left edge (Right), the progress text's right edge (Left) or the middle of the icon and text (Center).
-- **Avoid Auras** (on by default): when buff, debuff or crowd control icons are in the way, the mark slides clear of them (right for Right, left for Left, up for Center), leaving **Aura Spacing** (2 px by default) between them.
+- **Avoid Auras** (on by default): while the nameplate shows aura icons on the mark's side, the mark moves past them: right of the crowd control icons (Right), left of the buff icons (Left), above the debuff icons (Center), **Aura Spacing** (2 px by default) away. Nameplates can't be measured by addons on this client, so the mark is anchored to the aura row rather than nudged only as far as needed.
 - **Two icons** side by side for a unit that counts for objectives of two different kinds, each with its progress.
 - **Progress-bar percentages** ("35%") next to the icon, like "3/8" counts.
 - **Refresh fixes.** Retail nameplates store their unit as `unitToken`; upstream looked up `namePlateUnitToken`, so
