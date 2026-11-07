@@ -205,10 +205,6 @@ local function MarkWidth(f)
     return width
 end
 
--- The mark reads left to right (icon, second icon, progress text). Placed by the whole mark:
--- Right: its left edge (the icon's) the horizontal offset right of the nameplate.
--- Left: its right edge (the progress text's) the offset left of the nameplate.
--- Center: its middle the offset right of the nameplate's middle.
 local function Number(v)
     if v == nil or (issecretvalue and issecretvalue(v)) then return nil end
     return v
@@ -218,7 +214,8 @@ end
 -- { left, right, bottom, top } on the screen. Anything unreadable (secret) is left out.
 local AURA_LISTS = { "DebuffListFrame", "BuffListFrame", "CrowdControlListFrame" }
 
-local function AuraRects(plate)
+-- (stats: for /fqm debug, counts of what was found and what couldn't be read)
+local function AuraRects(plate, stats)
     local auras = plate.UnitFrame and plate.UnitFrame.AurasFrame
     local out = {}
     if not auras then return out end
@@ -227,12 +224,15 @@ local function AuraRects(plate)
         if list and list:IsVisible() then
             for _, item in ipairs({ list:GetChildren() }) do
                 local shown = Number(item:IsVisible())
+                if stats then stats.items = (stats.items or 0) + 1 end
                 if shown then
                     local ok, l, b, w, h = pcall(item.GetRect, item)
                     l, b, w, h = Number(l), Number(b), Number(w), Number(h)
                     if ok and l and b and w and h and w > 0 then
                         local s = item:GetEffectiveScale()
                         out[#out + 1] = { l * s, (l + w) * s, b * s, (b + h) * s }
+                    elseif stats then
+                        stats.unreadable = (stats.unreadable or 0) + 1
                     end
                 end
             end
@@ -258,8 +258,38 @@ local function AuraShift(plate, mark, gap)
     return shift
 end
 
-local function Place(f)
+-- Avoid Auras: place a plate's mark again whenever one of its aura lists lays itself out (Blizzard
+-- does that each time the unit's auras change). Nameplates swap their unit frame (and so their aura
+-- lists) from a pool, so each list is hooked the first time it's seen on any plate, and finds its
+-- plate's mark when called. Secure hooks: Blizzard's code isn't touched.
+local Place
+local hookedLists = setmetatable({}, { __mode = "k" })
+
+local function HookAuraLists(plate)
+    local auras = plate.UnitFrame and plate.UnitFrame.AurasFrame
+    if not auras then return end
+    for _, key in ipairs(AURA_LISTS) do
+        local list = auras[key]
+        if list and list.Layout and not hookedLists[list] then
+            hookedLists[list] = true
+            hooksecurefunc(list, "Layout", function(self)
+                if not DB.avoidAuras then return end
+                local unitFrame = self:GetParent() and self:GetParent():GetParent()
+                local f = unitFrame and icons[unitFrame:GetParent()]
+                if f and f:IsShown() then Place(f) end
+            end)
+        end
+    end
+end
+
+-- The mark reads left to right (icon, second icon, progress text). Placed by the whole mark:
+-- Right: its left edge (the icon's) the horizontal offset right of the nameplate.
+-- Left: its right edge (the progress text's) the offset left of the nameplate.
+-- Center: its middle the offset right of the nameplate's middle.
+-- Avoid Auras then slides it clear of any aura icon in its way.
+function Place(f)
     local plate, width = f:GetParent(), MarkWidth(f)
+    HookAuraLists(plate)
     local x, y = DB.x, DB.y
     local point, relPoint
     if DB.side == "left" then
@@ -306,19 +336,8 @@ local function GetIcon(plate)
     f.tex2:SetSize(DB.size, DB.size)
     f.tex2:Hide()
     f.text = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    -- Avoid Auras: place the mark again whenever one of the plate's aura lists lays itself out
-    -- (Blizzard does that each time the unit's auras change). Secure hooks, so Blizzard's code isn't touched.
-    local auras = plate.UnitFrame and plate.UnitFrame.AurasFrame
-    for _, key in ipairs(AURA_LISTS) do
-        local list = auras and auras[key]
-        if list and list.Layout then
-            hooksecurefunc(list, "Layout", function()
-                if DB.avoidAuras and f:IsShown() then Place(f) end
-            end)
-        end
-    end
-    Place(f)
     icons[plate] = f
+    Place(f)
     return f
 end
 
@@ -566,6 +585,31 @@ SlashCmdList.FOREVERQUESTMARK = function(msg)
             debugFrame:Hide()
         else p("RelatedToQuest:", tostring(rel)) end
         p("LogGuess:", pcall(LogGuess, "target"))
+        -- Avoid Auras: what the target's nameplate auras look like to the addon
+        local plate = C_NamePlate.GetNamePlateForUnit("target")
+        if plate then
+            local stats = {}
+            local rects = AuraRects(plate, stats)
+            local auras = plate.UnitFrame and plate.UnitFrame.AurasFrame
+            p("auras frame:", tostring(auras ~= nil), "aura items:", stats.items or 0, "readable:", #rects,
+                "unreadable:", stats.unreadable or 0)
+            local f = icons[plate]
+            if f and f:IsShown() then
+                local ok, l, b = pcall(f.GetRect, f)
+                local secret = issecretvalue and ok and (issecretvalue(l) or issecretvalue(b))
+                local s = f:GetEffectiveScale()
+                if ok and l and not secret then
+                    local mark = { l * s, (l + MarkWidth(f)) * s, b * s, (b + DB.size) * s }
+                    p(("mark: %.0f-%.0f x %.0f-%.0f, shift needed: %.1f"):format(mark[1], mark[2], mark[3], mark[4],
+                        AuraShift(plate, mark, DB.auraGap * s) / s))
+                else
+                    p("mark rect:", ok and (secret and "<secret>" or "nil") or tostring(l))
+                end
+                for i, a in ipairs(rects) do p(("aura %d: %.0f-%.0f x %.0f-%.0f"):format(i, a[1], a[2], a[3], a[4])) end
+            else
+                p("no mark shown on the target's nameplate")
+            end
+        end
         local qok, marks = pcall(QuestInfo, "target")
         if not qok then
             p("QuestInfo error:", tostring(marks))
