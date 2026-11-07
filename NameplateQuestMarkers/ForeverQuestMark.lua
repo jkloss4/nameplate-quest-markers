@@ -194,30 +194,35 @@ local function LogGuess(unit)
     return DB.loot, "" -- mixed or unknown: loot is the likelier kind for a named-but-unmatched mob
 end
 
--- The second icon and the progress text go on the side away from the nameplate: to the left of the
--- mark when it's left of the plate, else to its right. Returns point, relativePoint, gap.
-local function Outward()
-    if DB.side == "left" then return "RIGHT", "LEFT", -2 end
-    return "LEFT", "RIGHT", 2
+local GAP = 2 -- between the icon, the second icon and the progress text
+
+-- The whole mark's width: the icon, the second icon if shown, and the progress text if any.
+local function MarkWidth(f)
+    local width = DB.size
+    if f.tex2:IsShown() then width = width + GAP + DB.size end
+    local text = f.text:GetText()
+    if text and text ~= "" then width = width + GAP + f.text:GetStringWidth() end
+    return width
 end
 
--- Put the mark beside the nameplate (left or right; the horizontal offset is the gap from that edge) or
--- over its middle (the offset moves it right), then its second icon and progress text after it.
+-- The mark reads left to right (icon, second icon, progress text). Placed by the whole mark:
+-- Right: its left edge (the icon's) the horizontal offset right of the nameplate.
+-- Left: its right edge (the progress text's) the offset left of the nameplate.
+-- Center: its middle the offset right of the nameplate's middle.
 local function Place(f)
-    local plate = f:GetParent()
+    local plate, width = f:GetParent(), MarkWidth(f)
     f:ClearAllPoints()
     if DB.side == "left" then
-        f:SetPoint("RIGHT", plate, "LEFT", -DB.x, DB.y)
+        f:SetPoint("LEFT", plate, "LEFT", -DB.x - width, DB.y)
     elseif DB.side == "center" then
-        f:SetPoint("CENTER", plate, "CENTER", DB.x, DB.y)
+        f:SetPoint("LEFT", plate, "CENTER", DB.x - width / 2, DB.y)
     else
         f:SetPoint("LEFT", plate, "RIGHT", DB.x, DB.y)
     end
-    local point, relPoint, gap = Outward()
     f.tex2:ClearAllPoints()
-    f.tex2:SetPoint(point, f, relPoint, gap, 0)
+    f.tex2:SetPoint("LEFT", f, "RIGHT", GAP, 0)
     f.text:ClearAllPoints()
-    f.text:SetPoint(point, f.tex2:IsShown() and f.tex2 or f, relPoint, gap, 0)
+    f.text:SetPoint("LEFT", f.tex2:IsShown() and f.tex2 or f, "RIGHT", GAP, 0)
 end
 
 local function GetIcon(plate)
@@ -249,10 +254,6 @@ local function SetMarks(icon, marks)
         icon.tex2:Hide()
     end
 
-    local point, relPoint, gap = Outward()
-    icon.text:ClearAllPoints()
-    icon.text:SetPoint(point, second and icon.tex2 or icon, relPoint, gap, 0)
-
     local parts = {}
     if DB.progress then
         for _, mark in ipairs(marks) do
@@ -260,6 +261,7 @@ local function SetMarks(icon, marks)
         end
     end
     icon.text:SetText(table.concat(parts, "  "))
+    Place(icon) -- the mark's width changed with its icons and text
 end
 
 -- Optional: turn marks off inside instances, where the icon kind is only a guess (see LogGuess).
@@ -436,7 +438,7 @@ page:Dropdown("Position", {
     { label = "Right", value = "right", tooltip = "Right of the nameplate." },
 }, Getter("side"), Setter("side"), "Which side of the nameplate the quest mark goes on.")
 page:Slider("Horizontal Offset", -60, 60, 1, Getter("x"), Setter("x"), Pixels,
-    "Left or Right: the gap from that edge of the nameplate (higher is further out). Center: how far right of the middle.")
+    "Right: the gap from the nameplate to the icon. Left: the gap from the progress text to the nameplate. Center: how far right of the nameplate's middle the middle of the icon and text is. Higher is further out (Center: further right).")
 page:Slider("Vertical Offset", -60, 60, 1, Getter("y"), Setter("y"), Pixels, "Distance up or down from the middle of the nameplate.")
 page:Dropdown("Kill Objective Icon", IconOptions, Getter("kill"), Setter("kill"), "Icon for units you need to kill.")
 page:Dropdown("Loot Objective Icon", IconOptions, Getter("loot"), Setter("loot"), "Icon for units that drop quest items.")

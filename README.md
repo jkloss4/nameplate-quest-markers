@@ -14,7 +14,7 @@ it alongside the upstream addon.
   is the fallback when the quest log can't tell.
 - **Talk-to NPCs.** Units whose tooltip lists no objective, but that the game reports as part of an active quest,
   get the other icon. A speech bubble (`Crosshair_speak_32`) is available for it in the icon list.
-- **Position**: left, center or right of the nameplate (Left mirrors the second icon and progress text outward).
+- **Position**: left, center or right of the nameplate. The horizontal offset is measured from the icon's left edge (Right), the progress text's right edge (Left) or the middle of the icon and text (Center).
 - **Two icons** side by side for a unit that counts for objectives of two different kinds, each with its progress.
 - **Progress-bar percentages** ("35%") next to the icon, like "3/8" counts.
 - **Refresh fixes.** Retail nameplates store their unit as `unitToken`; upstream looked up `namePlateUnitToken`, so
