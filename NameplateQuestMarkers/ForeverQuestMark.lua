@@ -1,12 +1,17 @@
 -- ForeverQuestMark: quest icons on nameplates. Reads the unit's tooltip data for quest objective lines
--- and classifies each objective (kill / loot / other) from the quest log's own objective types.
+-- and classifies each objective (slay / loot / object / event / talk / interact) from the quest log's own
+-- objective types.
 local addonName, ns = ...
 local icons = {}
 local Relayout -- defined below, referenced by the event handler
+-- The objective categories, each with its own icon setting (the setting's key is the category's).
+local KINDS = { "kill", "loot", "object", "event", "talk", "interact" }
 -- Saved variables load after this file runs, so adopt them on ADDON_LOADED (see bottom).
-local DB = setmetatable({}, { __index = { kill = "Crosshair_Attack_32", loot = "Crosshair_pickup_32", other = "Crosshair_Interact_32",
+local DB = setmetatable({}, { __index = { kill = "Crosshair_Attack_32", loot = "Crosshair_pickup_32",
+    object = "Crosshair_Interact_32", event = "Crosshair_Inspect_32", talk = "Crosshair_speak_32",
+    interact = "Crosshair_Interact_32",
     side = "right", x = 4, y = -8, size = 20, avoidAuras = true, auraGap = 2,
-    enabled = true, progress = true, hideInInstances = false } })
+    enabled = true, progress = true, groupObjectives = false, hideInInstances = false } })
 
 -- Objective text reduced to its words, so a tooltip line and the matching quest log objective
 -- compare equal however their counts are written ("3/8 Foo slain", "Foo slain (3/8)", "35%").
@@ -37,11 +42,13 @@ local function ObjectiveKinds()
     return objectiveKinds
 end
 
---- The icon for a quest log objective type: kill for "monster", loot for "item", other otherwise.
-local function KindIcon(objectiveType)
-    if objectiveType == "monster" then return DB.kill end
-    if objectiveType == "item" then return DB.loot end
-    return DB.other
+-- A category's icon (its setting): the gear when that atlas isn't on this client, so a mark never
+-- shows blank.
+local FALLBACK_ICON = "Crosshair_Interact_32"
+local function Icon(kind)
+    local atlas = DB[kind]
+    if atlas and C_Texture.GetAtlasInfo(atlas) then return atlas end
+    return FALLBACK_ICON
 end
 
 -- Wording fallback for kills the quest log doesn't type as "monster" (e.g. progress bars filled
@@ -58,26 +65,111 @@ local function HasKillWording(text)
     return false
 end
 
---- The icon for an objective from its quest log type and text: loot for "item" objectives, kill
---- for kill wording or "monster" objectives, other for any other known objective type (interact,
---- use, ...). The quest log also types talk-to objectives ("Speak with X") as "monster", so a
---- "monster" objective without kill wording on a unit that can't be attacked counts as other.
---- A progress bar on a unit that can be attacked is filled by killing it, so it counts as kill.
+--- The icon for an objective from its quest log type and text:
+---   loot      "item" objectives;
+---   slay      kill wording, or "monster" objectives on a unit that can be attacked;
+---   talk      "monster" objectives on a unit that can't be (the quest log types talk-to objectives,
+---             "Speak with X", as "monster" too);
+---   object    "object" objectives;
+---   event     "event" and "log" objectives, and progress bars on a unit that can't be attacked (one on
+---             a unit that can be is filled by killing it, so it's slay);
+---   interact  any other known type (use, ...); also units the game ties to a quest without an
+---             objective line (Update).
 --- An objective of unknown type keeps the original behaviour: loot unless kill wording.
 --- Used for both tooltip lines (open world) and quest log objectives (instance fallback).
 --- @param kind string|nil The quest log objective type, if known.
 --- @param text string|nil The objective text.
 --- @param hostile boolean|nil Whether the unit can be attacked; nil when unknown.
 local function ClassifyObjective(kind, text, hostile)
-    if kind == "item" then return KindIcon(kind) end
-    if HasKillWording(text) then return DB.kill end
-    if kind == "monster" then return hostile == false and DB.other or DB.kill end
-    if kind == "progressbar" and hostile then return DB.kill end
-    return kind and DB.other or DB.loot
+    if kind == "item" then return Icon("loot") end
+    if HasKillWording(text) then return Icon("kill") end
+    if kind == "monster" then return hostile == false and Icon("talk") or Icon("kill") end
+    if kind == "progressbar" then return hostile and Icon("kill") or Icon("event") end
+    if kind == "object" then return Icon("object") end
+    if kind == "event" or kind == "log" then return Icon("event") end
+    return kind and Icon("interact") or Icon("loot")
 end
 
---- The icon for a tooltip quest objective line, classified by its matching quest log objective.
-local function ObjectiveIcon(text, hostile)
+--------------------------------------------------------------------------------
+-- Questie's categories, when Questie is loaded. Its database (QuestieDB) knows each creature's part in each
+-- quest, and its Talk and Interact objectives are picked by hand, quest by quest, so where it has a creature
+-- its category wins; elsewhere (no Questie, or a creature it doesn't list) ours above decides. Read from
+-- QuestieTooltips.lookupByKey["m_<npc id>"], each entry's objective (Icon, Description, Completed,
+-- Collected/Needed, Update): the table Questie's own nameplate icons and Plater read. Read, not called into,
+-- except the objective's Update, which Questie's nameplates call the same way for fresh quest log data.
+--------------------------------------------------------------------------------
+
+-- Questie's icon types (Questie.lua's ICON_TYPE_*) -> our categories. Questie shows its Object type as loot
+-- on creatures (QuestieNameplate.lua: a creature never holds an object), so that's loot here too.
+local QUESTIE_KINDS = { [1] = "kill", [2] = "loot", [3] = "event", [4] = "loot", [5] = "talk", [17] = "interact" }
+
+local questieTooltips
+local function QuestieLookup()
+    if questieTooltips then return questieTooltips.lookupByKey end
+    local loader = _G.QuestieLoader
+    local module = loader and type(loader._modules) == "table" and loader._modules.QuestieTooltips
+    if module and type(module.lookupByKey) == "table" then questieTooltips = module return module.lookupByKey end
+end
+
+-- Questie's objectives on the unit (a table of { objective = ... }), or nil: no Questie, not a creature
+-- it lists, or the unit's id hidden (secret, in instances).
+local function QuestieObjectives(unit)
+    local lookup = QuestieLookup()
+    if not lookup then return end
+    local ok, guid = pcall(UnitGUID, unit)
+    if not ok or not guid or (issecretvalue and issecretvalue(guid)) then return end
+    local unitType, _, _, _, _, npcId = strsplit("-", guid)
+    if (unitType ~= "Creature" and unitType ~= "Vehicle") or not npcId then return end
+    return lookup["m_" .. npcId]
+end
+
+-- The objective is still open (after Questie's own refresh of it from the quest log)
+local function QuestieOpen(objective)
+    if type(objective.Update) == "function" then pcall(objective.Update, objective) end
+    return not objective.Completed
+end
+
+-- Questie's category for a tooltip objective line, from its objective with the same text; nil when it has
+-- none of that text.
+local function QuestieKindFor(entries, text)
+    if not entries then return end
+    local want = NormalizeObjective(text)
+    for _, entry in pairs(entries) do
+        local o = entry.objective
+        local kind = type(o) == "table" and QUESTIE_KINDS[o.Icon]
+        if kind and type(o.Description) == "string" then
+            local desc = NormalizeObjective(o.Description)
+            if desc ~= "" and (want:find(desc, 1, true) or desc:find(want, 1, true)) then return kind end
+        end
+    end
+end
+
+-- Marks from Questie alone, for a unit whose tooltip lists no objective: one per category of its open
+-- objectives on the unit, with Questie's count; nil when there are none.
+local function QuestieMarks(entries)
+    if not entries then return end
+    local marks, seen = {}, {}
+    for _, entry in pairs(entries) do
+        local o = entry.objective
+        local kind = type(o) == "table" and QUESTIE_KINDS[o.Icon]
+        if kind and QuestieOpen(o) then
+            local icon = Icon(kind)
+            if not seen[icon] then
+                seen[icon] = true
+                local have, need = tonumber(o.Collected), tonumber(o.Needed)
+                marks[#marks + 1] = { icon = icon, progress = (have and need and need > 1) and (have .. "/" .. need) or "" }
+                if #marks == 2 then break end   -- (MAX_MARKS, below)
+            end
+        end
+    end
+    return marks[1] and marks or nil
+end
+
+--- The icon for a tooltip quest objective line: Questie's category for it when Questie has one, else
+--- classified by its matching quest log objective.
+local function ObjectiveIcon(text, hostile, questie)
+    local kind = QuestieKindFor(questie, text)
+    if kind then return Icon(kind) end
     return ClassifyObjective(ObjectiveKinds()[NormalizeObjective(text)], text, hostile)
 end
 
@@ -101,14 +193,41 @@ local function QuestInfo(unit)
     if TooltipUtil and TooltipUtil.SurfaceArgs then TooltipUtil.SurfaceArgs(data) end
     local marks, seen = {}, {}
     local hostile = IsHostile(unit)
+    local questie = QuestieObjectives(unit)
+    -- In a group, the tooltip lists each party member who shares the quest: a QuestPlayer line with
+    -- their name, then their objectives. Only the player's own objectives count: those before any
+    -- name line under a quest title, or under the player's own name.
+    -- With Group Objectives on, a party member's open objective still shows its icon (no progress:
+    -- the count is theirs), after the player's own marks and only for a kind they don't already show.
+    local types = Enum.TooltipDataLineType
+    local me = UnitName("player")
+    local mine = true
+    local party = {}
     for _, line in ipairs(data.lines or {}) do
         if TooltipUtil and TooltipUtil.SurfaceArgs then TooltipUtil.SurfaceArgs(line) end
-        if line.type == Enum.TooltipDataLineType.QuestObjective and line.leftText then
+        if line.type == types.QuestTitle then
+            mine = true
+        elseif types.QuestPlayer and line.type == types.QuestPlayer then
+            local name = line.leftText and line.leftText:match("^%s*([^%-]+)")
+            mine = name ~= nil and strtrim(name) == me
+        elseif not mine and DB.groupObjectives and line.type == types.QuestObjective and line.leftText then
+            if not line.completed then
+                local text = line.leftText
+                local have, need = text:match("^(%d+)%s*/%s*(%d+)")
+                local percent = not have and text:match("(%d+)%%")
+                if line.completed == false or (have and tonumber(have) < tonumber(need))
+                    or (percent and tonumber(percent) < 100) or not (have or percent) then
+                    party[#party + 1] = ObjectiveIcon(text, hostile, questie)
+                end
+            end
+        elseif mine and line.type == types.QuestObjective and line.leftText then
             local text = line.leftText
             local have, need = text:match("^(%d+)%s*/%s*(%d+)")
             local percent = not have and text:match("(%d+)%%")
             local incomplete
-            if have then
+            if line.completed ~= nil then
+                incomplete = not line.completed
+            elseif have then
                 incomplete = tonumber(have) < tonumber(need)
             elseif percent then
                 incomplete = tonumber(percent) < 100
@@ -116,16 +235,22 @@ local function QuestInfo(unit)
                 incomplete = true
             end
             if incomplete then
-                local icon = ObjectiveIcon(text, hostile)
-                if not seen[icon] then
+                local icon = ObjectiveIcon(text, hostile, questie)
+                if not seen[icon] and #marks < MAX_MARKS then
                     seen[icon] = true
                     marks[#marks + 1] = {
                         icon = icon,
                         progress = have and (have .. "/" .. need) or percent and (percent .. "%") or "",
                     }
-                    if #marks == MAX_MARKS then break end
                 end
             end
+        end
+    end
+    for _, icon in ipairs(party) do
+        if #marks == MAX_MARKS then break end
+        if not seen[icon] then
+            seen[icon] = true
+            marks[#marks + 1] = { icon = icon, progress = "" }
         end
     end
     return marks[1] and marks or nil
@@ -187,11 +312,11 @@ local function LogGuess(unit)
     -- Unknown counts as hostile: in instances, where this fallback runs, addons don't get friendly
     -- nameplates, so a unit whose hostility is hidden is almost certainly an enemy.
     if hostile ~= false then
-        if perKind[DB.kill] then return pick(DB.kill) end
-        if perKind[DB.loot] then return pick(DB.loot) end
+        if perKind[Icon("kill")] then return pick(Icon("kill")) end
+        if perKind[Icon("loot")] then return pick(Icon("loot")) end
     end
     if kindCount == 1 then return pick(only[1]) end
-    return DB.loot, "" -- mixed or unknown: loot is the likelier kind for a named-but-unmatched mob
+    return Icon("loot"), "" -- mixed or unknown: loot is the likelier kind for a named-but-unmatched mob
 end
 
 local GAP = 2 -- between the icon, the second icon and the progress text
@@ -393,13 +518,19 @@ local function Update(unit)
     if IsPlayer(unit) then icon:Hide(); return end
     local ok, marks = pcall(QuestInfo, unit)
     if ok then
+        -- no objective line in the tooltip: Questie's objectives on the unit, when it has any (e.g. an NPC
+        -- to talk to, or a creature dropping a quest item the game doesn't tie to it)
+        if not marks then
+            local qok, qmarks = pcall(QuestieMarks, QuestieObjectives(unit))
+            marks = qok and qmarks or nil
+        end
         if marks then
             SetMarks(icon, marks)
             icon:Show()
         elseif UnitIsQuestRelated(unit) then
             -- no objective line in the tooltip, but the game says this unit is part of an active quest
             -- (e.g. an NPC to talk to, whose tooltip doesn't list the objective)
-            SetMarks(icon, { { icon = DB.other, progress = "" } })
+            SetMarks(icon, { { icon = Icon("interact"), progress = "" } })
             icon:Show()
         else
             icon:Hide()
@@ -409,7 +540,7 @@ local function Update(unit)
     -- Tooltip lines are secret (seen in dungeons): fall back to a yes/no quest check, no kind or progress.
     local related = C_QuestLog.UnitIsRelatedToActiveQuest and C_QuestLog.UnitIsRelatedToActiveQuest(unit)
     local gok, atlas, prog = pcall(LogGuess, unit)
-    SetMarks(icon, { { icon = gok and atlas or DB.loot, progress = gok and prog or "" } })
+    SetMarks(icon, { { icon = gok and atlas or Icon("loot"), progress = gok and prog or "" } })
     if issecretvalue and issecretvalue(related) then
         -- can't branch on a secret boolean, but SetShown may accept one; hide if it doesn't
         if not pcall(icon.SetShown, icon, related) then icon:Hide() end
@@ -470,6 +601,12 @@ ev:SetScript("OnEvent", function(_, event, unit)
         if unit == addonName then
             if type(ForeverQuestMarkDB) == "table" then Mixin(DB, ForeverQuestMarkDB) end
             DB._savedAt = nil -- leftover from the old Forever-client save workaround
+            -- the old "other" icon (talk, interact and the rest, before they had their own) carries on as
+            -- the interact icon
+            if rawget(DB, "other") then
+                if not rawget(DB, "interact") then DB.interact = DB.other end
+                DB.other = nil
+            end
             ForeverQuestMarkDB = DB
             if next(icons) then Relayout() end
         end
@@ -501,8 +638,13 @@ local function Setter(key) return function(v) DB[key] = v; Relayout() end end
 local function Getter(key) return function() return DB[key] end end
 
 -- Blizzard atlases that read well as a quest mark; ones missing on this client are skipped.
-local ICONS = { "Crosshair_Attack_32", "Crosshair_pickup_32", "Crosshair_Quest_32", "Crosshair_lootall_32",
-    "Crosshair_Interact_32", "Crosshair_speak_32", "QuestNormal", "QuestDaily", "QuestBonusObjective", "Islands-QuestBang" }
+local ICONS = {
+    -- the cursor's icons
+    "Crosshair_Attack_32", "Crosshair_pickup_32", "Crosshair_lootall_32", "Crosshair_Interact_32", "Crosshair_speak_32",
+    "Crosshair_Quest_32", "Crosshair_Questturnin_32", "Crosshair_Directions_32", "Crosshair_Inspect_32",
+    -- the map pin
+    "Waypoint-MapPin-Tracked",
+}
 local function IconOptions()
     local out, seen = {}, {}
     local function Add(atlas)
@@ -513,7 +655,7 @@ local function IconOptions()
         if C_Texture.GetAtlasInfo(atlas) then Add(atlas) end
     end
     -- keep a custom atlas set by /fqm selectable
-    for _, key in ipairs({ "kill", "loot", "other" }) do
+    for _, key in ipairs(KINDS) do
         if not seen[DB[key]] then Add(DB[key]) end
     end
     return out
@@ -524,6 +666,8 @@ local function Pixels(v) return tostring(v) end
 page:Header("General")
 page:Checkbox("Enabled", Getter("enabled"), Setter("enabled"), "Show quest marks on nameplates.")
 page:Checkbox("Show Progress", Getter("progress"), Setter("progress"), "Show the objective progress (e.g. 3/8 or 35%) next to the icon.")
+page:Checkbox("Group Objectives", Getter("groupObjectives"), Setter("groupObjectives"),
+    "Also mark units a party member still needs for a quest you share, after your own part is done. The icon shows without progress, since the count is theirs.")
 page:Checkbox("Hide Inside Instances", Getter("hideInInstances"), Setter("hideInInstances"),
     "Turn marks off in dungeons, raids, battlegrounds and arenas. Inside instances the icon kind is guessed from the quest log and may be wrong when kill and loot quests mix.")
 page:Header("Icon")
@@ -540,10 +684,18 @@ page:Checkbox("Avoid Auras", Getter("avoidAuras"), Setter("avoidAuras"),
     "While the nameplate shows aura icons on the quest mark's side, move the mark past them: right of the crowd control icons when Position is Right, left of the buff icons when Left, above the debuff icons when Center. It moves back when they're gone.")
 page:Slider("Aura Spacing", 0, 20, 1, Getter("auraGap"), Setter("auraGap"), Pixels,
     "The space between the aura icons and the quest mark while it's moved past them (in place of the horizontal offset for Left and Right, and the vertical offset for Center).", { indent = true, enabled = Getter("avoidAuras") })
-page:Dropdown("Kill Objective Icon", IconOptions, Getter("kill"), Setter("kill"), "Icon for units you need to kill.")
-page:Dropdown("Loot Objective Icon", IconOptions, Getter("loot"), Setter("loot"), "Icon for units that drop quest items.")
-page:Dropdown("Other Objective Icon", IconOptions, Getter("other"), Setter("other"),
-    "For quest units that are neither a kill nor a loot objective, such as NPCs to talk to or things to interact with.")
+page:Header("Objective Icons")
+page:Dropdown("Slay Objectives", IconOptions, Getter("kill"), Setter("kill"),
+    "Units you need to kill, including progress bars you fill by killing them.")
+page:Dropdown("Loot Objectives", IconOptions, Getter("loot"), Setter("loot"), "Units that drop quest items.")
+page:Dropdown("Object Objectives", IconOptions, Getter("object"), Setter("object"),
+    "Units counted by a quest's object objectives (things to use or click).")
+page:Dropdown("Event Objectives", IconOptions, Getter("event"), Setter("event"),
+    "Units counted by event objectives, and progress bars you don't fill by killing.")
+page:Dropdown("Talk Objectives", IconOptions, Getter("talk"), Setter("talk"),
+    "Friendly NPCs a quest asks you to speak with.")
+page:Dropdown("Interact Objectives", IconOptions, Getter("interact"), Setter("interact"),
+    "Units the game ties to one of your quests without naming an objective on them, and any other kind of objective.")
 Kit.Register(page)
 
 local debugFrame -- reused by /fqm debug to test whether SetShown accepts a secret boolean
@@ -555,7 +707,7 @@ SlashCmdList.FOREVERQUESTMARK = function(msg)
         DB[cmd] = tonumber(arg)
     elseif cmd == "side" and (arg == "left" or arg == "center" or arg == "right") then
         DB.side = arg
-    elseif (cmd == "kill" or cmd == "loot" or cmd == "other") and arg ~= "" then
+    elseif cmd and tContains(KINDS, cmd) and arg ~= "" then
         if not C_Texture.GetAtlasInfo(arg) then print("Nameplate Quest Markers: no atlas named " .. arg); return end
         DB[cmd] = arg
     elseif cmd == "reset" then
@@ -581,6 +733,18 @@ SlashCmdList.FOREVERQUESTMARK = function(msg)
             debugFrame:Hide()
         else p("RelatedToQuest:", tostring(rel)) end
         p("LogGuess:", pcall(LogGuess, "target"))
+        -- Questie's objectives on the target, with the category each maps to
+        if not QuestieLookup() then
+            p("Questie: not loaded")
+        else
+            local entries = QuestieObjectives("target")
+            if not entries then p("Questie: nothing on this unit") end
+            for key, entry in pairs(entries or {}) do
+                local o = entry.objective or {}
+                p("Questie", key, tostring(o.Description), "icon type", tostring(o.Icon), "->",
+                    tostring(QUESTIE_KINDS[o.Icon]), "completed", tostring(o.Completed))
+            end
+        end
         -- Avoid Auras: the target's aura icons as the addon sees them, and which list the mark sits past
         local plate = C_NamePlate.GetNamePlateForUnit("target")
         local auras = plate and plate.UnitFrame and plate.UnitFrame.AurasFrame

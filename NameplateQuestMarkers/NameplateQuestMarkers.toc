@@ -6,6 +6,7 @@
 ## X-License: MIT
 ## Version: 1.3.0
 ## SavedVariables: ForeverQuestMarkDB
+## OptionalDeps: Questie
 
 SettingsKit.lua
 ForeverQuestMark.lua
